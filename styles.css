@@ -134,7 +134,7 @@ button.secondary {
 .results {
   margin-top: 20px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 14px;
 }
 
@@ -153,7 +153,7 @@ button.secondary {
 
 .thumb {
   position: relative;
-  aspect-ratio: 1 / 1;
+  aspect-ratio: 4 / 1;
   border-radius: 6px;
   display: flex;
   align-items: center;
@@ -170,7 +170,7 @@ button.secondary {
 }
 
 .thumb img {
-  max-width: 88%;
+  max-width: 96%;
   max-height: 88%;
   object-fit: contain;
 }
@@ -242,4 +242,88 @@ footer {
   color: var(--muted);
   border-top: 1px solid var(--border);
   margin-top: 40px;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+button.ghost:hover:not(:disabled) { background: var(--border); }
+
+.settings {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.settings summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings .hint {
+  margin: 8px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.setting-row label {
+  flex: 0 0 180px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.setting-row input {
+  flex: 1;
+  min-width: 200px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 10px;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.attempts {
+  margin-top: 4px;
+}
+
+.attempts summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.attempt-log {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.attempt-log code {
+  background: var(--bg);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 11px;
 }

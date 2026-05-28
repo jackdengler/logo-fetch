@@ -1,42 +1,65 @@
 // ─── Config ──────────────────────────────────────────────────────────────────
-// Both tokens are *publishable* and safe to ship to the browser. If you fork
-// this and want better wordmark coverage, drop in your own:
-//   • Brandfetch clientId: https://developers.brandfetch.com/
-//   • logo.dev token:      https://www.logo.dev/
+// Tokens are persisted in localStorage from the in-page Settings panel.
 const CONFIG = {
-  brandfetchClientId: '',
-  logoDevToken: '',
+  brandfetchClientId: localStorage.getItem('brandfetchClientId') || '',
+  logoDevToken: localStorage.getItem('logoDevToken') || '',
   concurrency: 6,
-  minBlobBytes: 500, // weed out 1x1 / empty placeholders
+  minBlobBytes: 200,
+  // Final composite canvas dimensions
+  canvas: {
+    W: 1024,
+    H: 256,
+    iconBox: 200,
+    pad: 28,
+    maxFont: 130,
+    minFont: 28,
+    fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  },
 };
 
 // ─── Source chain ────────────────────────────────────────────────────────────
-// Tried in order; first hit wins.
+// Always fetching an *icon* (symbol-only) — the company name is drawn beside
+// it client-side, so we don't need wordmarks from the source.
 const SOURCES = [
   {
     name: 'Brandfetch',
     enabled: () => !!CONFIG.brandfetchClientId,
     url: (_, domain) =>
       domain
-        ? `https://cdn.brandfetch.io/${domain}/w/512/h/512/theme/light/logo?c=${CONFIG.brandfetchClientId}`
+        ? `https://cdn.brandfetch.io/${domain}/w/512/h/512/symbol?c=${encodeURIComponent(CONFIG.brandfetchClientId)}`
         : null,
   },
   {
     name: 'logo.dev',
     enabled: () => !!CONFIG.logoDevToken,
-    url: (ticker) =>
-      `https://img.logo.dev/ticker/${ticker}?token=${CONFIG.logoDevToken}&format=png&retina=true`,
+    url: (ticker, domain) => {
+      const key = encodeURIComponent(CONFIG.logoDevToken);
+      if (ticker) return `https://img.logo.dev/ticker/${ticker}?token=${key}&format=png&retina=true`;
+      if (domain) return `https://img.logo.dev/${domain}?token=${key}&format=png&retina=true`;
+      return null;
+    },
   },
   {
     name: 'Clearbit',
     enabled: () => true,
     url: (_, domain) => (domain ? `https://logo.clearbit.com/${domain}` : null),
   },
+  {
+    name: 'DuckDuckGo',
+    enabled: () => true,
+    url: (_, domain) => (domain ? `https://icons.duckduckgo.com/ip3/${domain}.ico` : null),
+  },
+  {
+    name: 'Google',
+    enabled: () => true,
+    url: (_, domain) =>
+      domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=256` : null,
+  },
 ];
 
 // ─── State ───────────────────────────────────────────────────────────────────
-let TICKER_MAP = {}; // { AAPL: { name, domain } }
-const cards = new Map(); // ticker -> { ticker, name, domain, blob, source, ext, node }
+let TICKER_MAP = {};
+const cards = new Map();
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 async function init() {
@@ -52,26 +75,38 @@ async function init() {
   document.getElementById('tickers').addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') onFetchClicked();
   });
+
+  document.getElementById('settings-toggle').addEventListener('click', () => {
+    const s = document.getElementById('settings');
+    s.open = !s.open;
+  });
+  document.getElementById('brandfetch-id').value = CONFIG.brandfetchClientId;
+  document.getElementById('logodev-token').value = CONFIG.logoDevToken;
+  document.getElementById('save-settings').addEventListener('click', () => {
+    const bf = document.getElementById('brandfetch-id').value.trim();
+    const ld = document.getElementById('logodev-token').value.trim();
+    CONFIG.brandfetchClientId = bf;
+    CONFIG.logoDevToken = ld;
+    if (bf) localStorage.setItem('brandfetchClientId', bf);
+    else localStorage.removeItem('brandfetchClientId');
+    if (ld) localStorage.setItem('logoDevToken', ld);
+    else localStorage.removeItem('logoDevToken');
+    const status = document.getElementById('settings-status');
+    status.textContent = 'Saved.';
+    setTimeout(() => (status.textContent = ''), 1500);
+  });
 }
 
 // ─── Input handling ──────────────────────────────────────────────────────────
 function parseTickers(raw) {
   return [...new Set(
-    raw
-      .toUpperCase()
-      .split(/[\s,;]+/)
-      .map((t) => t.trim())
-      .filter(Boolean)
+    raw.toUpperCase().split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean)
   )];
 }
 
 function onFetchClicked() {
-  const raw = document.getElementById('tickers').value;
-  const tickers = parseTickers(raw);
-  if (!tickers.length) {
-    setStatus('Enter at least one ticker.');
-    return;
-  }
+  const tickers = parseTickers(document.getElementById('tickers').value);
+  if (!tickers.length) { setStatus('Enter at least one ticker.'); return; }
   runFetch(tickers);
 }
 
@@ -80,15 +115,13 @@ async function runFetch(tickers) {
   document.getElementById('zip-btn').disabled = true;
   setStatus(`Fetching ${tickers.length} logo${tickers.length === 1 ? '' : 's'}…`);
 
-  // Reset prior results
   const grid = document.getElementById('results');
   grid.innerHTML = '';
   cards.clear();
 
-  // Spawn cards immediately so user sees progress
   for (const ticker of tickers) {
     const entry = TICKER_MAP[ticker] || {};
-    const card = createCard(ticker, entry.name || '', entry.domain || '');
+    const card = createCard(ticker, entry.name || ticker, entry.domain || '');
     cards.set(ticker, card);
     grid.appendChild(card.node);
   }
@@ -96,12 +129,13 @@ async function runFetch(tickers) {
   let okCount = 0;
   await processWithConcurrency(tickers, async (ticker) => {
     const card = cards.get(ticker);
-    const result = await fetchLogo(ticker, card.domain);
-    if (result) {
+    const out = await buildLogo(card);
+    card.attempts = out.log;
+    if (out.blob) {
       okCount++;
-      applyResult(card, result);
+      applyResult(card, out.blob, out.source);
     } else {
-      applyError(card, 'No source returned a logo.');
+      applyError(card);
     }
   }, CONFIG.concurrency);
 
@@ -121,32 +155,136 @@ async function processWithConcurrency(items, fn, max) {
   await Promise.all(workers);
 }
 
-// ─── Fetching ────────────────────────────────────────────────────────────────
-async function fetchLogo(ticker, domain) {
-  for (const source of SOURCES) {
-    if (!source.enabled()) continue;
-    const url = source.url(ticker, domain);
-    if (!url) continue;
-    try {
-      const res = await fetch(url, { mode: 'cors', cache: 'no-store' });
-      if (!res.ok) continue;
-      const ct = res.headers.get('content-type') || '';
-      if (!ct.startsWith('image/')) continue;
-      const blob = await res.blob();
-      if (blob.size < CONFIG.minBlobBytes) continue;
-      return { blob, source: source.name, ext: extFromContentType(ct) };
-    } catch (_) {
-      // CORS / network failure → try next
-    }
+// ─── Build pipeline: fetch icon → composite with name ────────────────────────
+async function buildLogo(card) {
+  const { result, log } = await fetchIcon(card.ticker, card.domain);
+  if (!result) return { blob: null, source: null, log };
+  try {
+    const iconImg = await blobToImage(result.blob);
+    const color = extractDominantColor(iconImg);
+    const composedBlob = await renderComposite(iconImg, card.name || card.ticker, color);
+    return { blob: composedBlob, source: result.source, log };
+  } catch (err) {
+    log.push({ source: 'composite', status: 'error', detail: err.message || 'compose failed' });
+    return { blob: null, source: null, log };
   }
-  return null;
 }
 
-function extFromContentType(ct) {
-  if (ct.includes('svg')) return 'svg';
-  if (ct.includes('jpeg') || ct.includes('jpg')) return 'jpg';
-  if (ct.includes('webp')) return 'webp';
-  return 'png';
+async function fetchIcon(ticker, domain) {
+  const log = [];
+  for (const source of SOURCES) {
+    if (!source.enabled()) {
+      log.push({ source: source.name, status: 'skipped', detail: 'not configured' });
+      continue;
+    }
+    const url = source.url(ticker, domain);
+    if (!url) {
+      log.push({ source: source.name, status: 'skipped', detail: 'no domain available' });
+      continue;
+    }
+    try {
+      const res = await fetch(url, { mode: 'cors', cache: 'no-store', redirect: 'follow' });
+      if (!res.ok) {
+        log.push({ source: source.name, status: 'http', detail: `HTTP ${res.status}`, url });
+        continue;
+      }
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.startsWith('image/')) {
+        log.push({ source: source.name, status: 'bad-type', detail: `content-type: ${ct || 'none'}`, url });
+        continue;
+      }
+      const blob = await res.blob();
+      if (blob.size < CONFIG.minBlobBytes) {
+        log.push({ source: source.name, status: 'too-small', detail: `${blob.size} bytes`, url });
+        continue;
+      }
+      log.push({ source: source.name, status: 'ok', detail: `${blob.size} bytes`, url });
+      return { result: { blob, source: source.name }, log };
+    } catch (err) {
+      log.push({ source: source.name, status: 'error', detail: err.message || 'fetch failed (likely CORS)', url });
+    }
+  }
+  return { result: null, log };
+}
+
+// ─── Compositing ─────────────────────────────────────────────────────────────
+function blobToImage(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = (e) => { URL.revokeObjectURL(url); reject(new Error('image decode failed')); };
+    img.src = url;
+  });
+}
+
+// Pick the most prominent saturated color from the icon. Falls back to a
+// neutral dark grey if the icon is monochrome (e.g. pure black/white).
+function extractDominantColor(img) {
+  const size = 64;
+  const cvs = document.createElement('canvas');
+  cvs.width = size; cvs.height = size;
+  const ctx = cvs.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, size, size);
+  let data;
+  try {
+    data = ctx.getImageData(0, 0, size, size).data;
+  } catch (_) {
+    // Canvas tainted by cross-origin image without CORS → can't read pixels.
+    return '#1c1f26';
+  }
+  const buckets = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+    if (a < 128) continue;
+    if (r > 240 && g > 240 && b > 240) continue;       // skip near-white
+    if (r < 25 && g < 25 && b < 25) continue;          // skip near-black
+    if (Math.max(r, g, b) - Math.min(r, g, b) < 20) continue; // skip greys
+    const key = `${r >> 4}|${g >> 4}|${b >> 4}`;
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+  if (buckets.size === 0) return '#1c1f26';
+  let bestKey = null, bestCount = 0;
+  for (const [k, v] of buckets) {
+    if (v > bestCount) { bestKey = k; bestCount = v; }
+  }
+  const [r, g, b] = bestKey.split('|').map((n) => parseInt(n, 10) * 16 + 8);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function renderComposite(iconImg, name, color) {
+  const { W, H, iconBox, pad, maxFont, minFont, fontFamily } = CONFIG.canvas;
+  const cvs = document.createElement('canvas');
+  cvs.width = W; cvs.height = H;
+  const ctx = cvs.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  // Icon, aspect-preserving, centred in its box
+  const ratio = Math.min(iconBox / iconImg.width, iconBox / iconImg.height);
+  const iw = iconImg.width * ratio;
+  const ih = iconImg.height * ratio;
+  const ix = pad + (iconBox - iw) / 2;
+  const iy = (H - ih) / 2;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(iconImg, ix, iy, iw, ih);
+
+  // Name beside it, sampled colour, shrink-to-fit
+  const textX = pad + iconBox + pad;
+  const maxTextWidth = W - textX - pad;
+  ctx.fillStyle = color;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  let fontSize = maxFont;
+  while (fontSize > minFont) {
+    ctx.font = `700 ${fontSize}px ${fontFamily}`;
+    if (ctx.measureText(name).width <= maxTextWidth) break;
+    fontSize -= 4;
+  }
+  ctx.fillText(name, textX, H / 2);
+
+  return new Promise((resolve, reject) =>
+    cvs.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png')
+  );
 }
 
 // ─── Card rendering ──────────────────────────────────────────────────────────
@@ -154,15 +292,14 @@ function createCard(ticker, name, domain) {
   const tpl = document.getElementById('card-template');
   const node = tpl.content.firstElementChild.cloneNode(true);
   node.querySelector('.ticker').textContent = ticker;
-  node.querySelector('.name').textContent = name || '—';
-  node.querySelector('.source').textContent = domain ? domain : 'no domain mapped';
-  return { ticker, name, domain, node, blob: null, source: null, ext: 'png' };
+  node.querySelector('.name').textContent = name;
+  node.querySelector('.source').textContent = domain || 'no domain mapped';
+  return { ticker, name, domain, node, blob: null, source: null, attempts: [] };
 }
 
-function applyResult(card, { blob, source, ext }) {
+function applyResult(card, blob, source) {
   card.blob = blob;
   card.source = source;
-  card.ext = ext;
   const node = card.node;
   node.dataset.state = 'ok';
 
@@ -173,41 +310,62 @@ function applyResult(card, { blob, source, ext }) {
   img.src = URL.createObjectURL(blob);
   thumb.appendChild(img);
 
-  node.querySelector('.source').textContent = `via ${source}`;
+  node.querySelector('.source').textContent = `icon via ${source}`;
 
   const dl = node.querySelector('.download');
-  dl.disabled = false;
-  dl.addEventListener('click', () => triggerDownload(blob, `${card.ticker}.${ext}`));
+  const freshDl = dl.cloneNode(true);
+  freshDl.disabled = false;
+  dl.replaceWith(freshDl);
+  freshDl.addEventListener('click', () => triggerDownload(blob, `${card.ticker}.png`));
 }
 
-function applyError(card, msg) {
+function applyError(card) {
   const node = card.node;
   node.dataset.state = 'error';
   const thumb = node.querySelector('.thumb');
   thumb.innerHTML = '<div class="error-msg">no logo</div>';
 
+  node.querySelector('.source').textContent =
+    card.domain ? `tried ${card.attempts.length} source${card.attempts.length === 1 ? '' : 's'}` : 'no domain mapped';
+
   const input = node.querySelector('.manual-domain');
   const retry = node.querySelector('.retry');
   input.hidden = false;
   input.value = card.domain || '';
-  retry.hidden = false;
-  retry.addEventListener('click', async () => {
+  const freshRetry = retry.cloneNode(true);
+  freshRetry.hidden = false;
+  retry.replaceWith(freshRetry);
+  freshRetry.addEventListener('click', async () => {
     const domain = input.value.trim().toLowerCase();
     if (!domain) return;
     card.domain = domain;
     node.dataset.state = 'loading';
     thumb.innerHTML = '<div class="spinner"></div>';
-    const result = await fetchLogo(card.ticker, domain);
-    if (result) {
-      applyResult(card, result);
+    const out = await buildLogo(card);
+    card.attempts = out.log;
+    if (out.blob) {
+      applyResult(card, out.blob, out.source);
       document.getElementById('zip-btn').disabled = false;
     } else {
-      applyError(card, msg);
+      applyError(card);
     }
   });
 
-  const sourceLine = node.querySelector('.source');
-  sourceLine.textContent = msg;
+  const details = node.querySelector('.attempts');
+  const list = node.querySelector('.attempt-log');
+  list.innerHTML = '';
+  for (const a of card.attempts) {
+    const li = document.createElement('li');
+    li.innerHTML = `<code>${a.source}</code> — ${a.status}: ${escapeHtml(a.detail)}`;
+    list.appendChild(li);
+  }
+  details.hidden = card.attempts.length === 0;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
 }
 
 // ─── ZIP export ──────────────────────────────────────────────────────────────
@@ -219,15 +377,9 @@ async function onZipClicked() {
   const zip = new JSZip();
   let added = 0;
   for (const card of cards.values()) {
-    if (card.blob) {
-      zip.file(`${card.ticker}.${card.ext}`, card.blob);
-      added++;
-    }
+    if (card.blob) { zip.file(`${card.ticker}.png`, card.blob); added++; }
   }
-  if (!added) {
-    setStatus('Nothing to bundle — no logos succeeded.');
-    return;
-  }
+  if (!added) { setStatus('Nothing to bundle — no logos succeeded.'); return; }
   setStatus(`Building ZIP with ${added} logo${added === 1 ? '' : 's'}…`);
   const blob = await zip.generateAsync({ type: 'blob' });
   triggerDownload(blob, `logos-${timestamp()}.zip`);
