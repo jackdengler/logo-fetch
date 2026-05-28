@@ -509,10 +509,15 @@ async function renderComposite(iconImg, name, color) {
 
 // Ensure the current OUTPUT.font is loaded before drawing. Canvas silently
 // falls back to a default font if you try to draw with an unloaded face.
+// Capped at 1.2s so a hung/slow webfont CDN can't stall the entire fetch
+// pipeline — we'd rather render in a system fallback than not at all.
 async function ensureFontLoaded() {
   if (!('fonts' in document)) return;
   try {
-    await document.fonts.load(`700 ${OUTPUT.fontSize}px "${OUTPUT.font}"`);
+    await Promise.race([
+      document.fonts.load(`700 ${OUTPUT.fontSize}px "${OUTPUT.font}"`),
+      new Promise((r) => setTimeout(r, 1200)),
+    ]);
   } catch (_) { /* fallback handled by font stack */ }
 }
 
