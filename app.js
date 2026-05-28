@@ -113,7 +113,11 @@ async function init() {
   document.getElementById('fetch-btn').addEventListener('click', onFetchClicked);
   document.getElementById('zip-btn').addEventListener('click', onZipClicked);
   document.getElementById('tickers').addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') onFetchClicked();
+    // Enter fetches; Shift+Enter inserts a newline if you're pasting a list.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      onFetchClicked();
+    }
   });
 
   document.getElementById('settings-toggle').addEventListener('click', () => {
