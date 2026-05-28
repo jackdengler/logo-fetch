@@ -3,8 +3,9 @@
 const CONFIG = {
   brandfetchClientId: localStorage.getItem('brandfetchClientId') || '',
   logoDevToken: localStorage.getItem('logoDevToken') || '',
-  concurrency: 6,
+  concurrency: 3,
   minBlobBytes: 200,
+  retryDelayMs: 400,
   // Final composite canvas dimensions
   canvas: {
     W: 1024,
@@ -100,6 +101,10 @@ const SOURCES = [
 // ─── State ───────────────────────────────────────────────────────────────────
 let TICKER_MAP = {};
 const cards = new Map();
+// Monotonic id of the current fetch run. Any in-flight fetches from a prior
+// run check this before mutating state — if the user kicked off a new run,
+// the old promise's result is discarded so it can't clobber fresh cards.
+let currentRunId = 0;
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 async function init() {
@@ -155,6 +160,7 @@ function onFetchClicked() {
 }
 
 async function runFetch(tickers) {
+  const runId = ++currentRunId;
   document.getElementById('fetch-btn').disabled = true;
   document.getElementById('zip-btn').disabled = true;
   setStatus(`Fetching ${tickers.length} logo${tickers.length === 1 ? '' : 's'}…`);
@@ -174,6 +180,8 @@ async function runFetch(tickers) {
   await processWithConcurrency(tickers, async (ticker) => {
     const card = cards.get(ticker);
     const out = await buildLogo(card);
+    // Stale result from a superseded run — discard.
+    if (runId !== currentRunId) return;
     card.attempts = out.log;
     if (out.blob) {
       okCount++;
@@ -182,6 +190,8 @@ async function runFetch(tickers) {
       applyError(card);
     }
   }, CONFIG.concurrency);
+
+  if (runId !== currentRunId) return;
 
   let statusMsg = `Done. ${okCount}/${tickers.length} succeeded.`;
   if (okCount === 0) {
@@ -253,34 +263,39 @@ async function fetchIcon(ctx) {
     let gotBlob = null;
     let gotVia = null;
     for (const attempt of attempts) {
-      try {
-        const res = await fetchWithTimeout(attempt.url, { mode: 'cors', cache: 'no-store', redirect: 'follow' });
-        if (!res.ok) {
-          log.push({ source: source.name, status: `${attempt.label} http`, detail: `HTTP ${res.status}` });
-          continue;
+      // One immediate try plus one retry after a brief backoff — covers
+      // transient network blips and CDN rate-limit hiccups.
+      for (let tryIdx = 0; tryIdx < 2 && !gotBlob; tryIdx++) {
+        if (tryIdx > 0) await new Promise((r) => setTimeout(r, CONFIG.retryDelayMs));
+        const tag = tryIdx === 0 ? attempt.label : `${attempt.label} retry`;
+        try {
+          const res = await fetchWithTimeout(attempt.url, { mode: 'cors', redirect: 'follow' });
+          if (!res.ok) {
+            log.push({ source: source.name, status: `${tag} http`, detail: `HTTP ${res.status}` });
+            continue;
+          }
+          const ct = res.headers.get('content-type') || '';
+          if (ct && !ct.startsWith('image/') && !ct.startsWith('application/octet-stream')) {
+            log.push({ source: source.name, status: `${tag} bad-type`, detail: ct });
+            continue;
+          }
+          const blob = await res.blob();
+          if (blob.size < CONFIG.minBlobBytes) {
+            log.push({ source: source.name, status: `${tag} too-small`, detail: `${blob.size} bytes` });
+            continue;
+          }
+          gotBlob = blob;
+          gotVia = tag;
+          log.push({ source: source.name, status: 'ok', detail: `${blob.size} bytes via ${tag}` });
+          break;
+        } catch (err) {
+          const detail = err.name === 'AbortError'
+            ? `timeout after ${CONFIG.fetchTimeoutMs}ms`
+            : err.message || 'fetch failed';
+          log.push({ source: source.name, status: `${tag} error`, detail });
         }
-        const ct = res.headers.get('content-type') || '';
-        // Some proxies strip / lie about content-type — only reject if it's
-        // explicitly text or json. Treat empty / octet-stream as maybe-image.
-        if (ct && !ct.startsWith('image/') && !ct.startsWith('application/octet-stream')) {
-          log.push({ source: source.name, status: `${attempt.label} bad-type`, detail: ct });
-          continue;
-        }
-        const blob = await res.blob();
-        if (blob.size < CONFIG.minBlobBytes) {
-          log.push({ source: source.name, status: `${attempt.label} too-small`, detail: `${blob.size} bytes` });
-          continue;
-        }
-        gotBlob = blob;
-        gotVia = attempt.label;
-        log.push({ source: source.name, status: 'ok', detail: `${blob.size} bytes via ${attempt.label}` });
-        break;
-      } catch (err) {
-        const detail = err.name === 'AbortError'
-          ? `timeout after ${CONFIG.fetchTimeoutMs}ms`
-          : err.message || 'fetch failed';
-        log.push({ source: source.name, status: `${attempt.label} error`, detail });
       }
+      if (gotBlob) break;
     }
 
     if (gotBlob) {
