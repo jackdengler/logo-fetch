@@ -35,14 +35,36 @@ function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG.fetchTimeoutMs) 
     .finally(() => clearTimeout(timer));
 }
 
+// Derive a simple-icons slug from a company name. Picks the parenthetical
+// short name when present ("Alphabet (Google)" → "google"), strips diacritics
+// and non-alphanumerics, and replaces special chars per simple-icons rules.
+function deriveSlug(name) {
+  if (!name) return '';
+  const paren = name.match(/\(([^)]+)\)/);
+  if (paren) name = paren[1];
+  return name
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, 'and')
+    .replace(/\+/g, 'plus')
+    .replace(/\./g, 'dot')
+    .replace(/[^a-z0-9]/g, '');
+}
+
 // ─── Source chain ────────────────────────────────────────────────────────────
-// Always fetching an *icon* (symbol-only) — the company name is drawn beside
-// it client-side, so we don't need wordmarks from the source.
+// Each source.url takes a context object: { ticker, domain, name, slug }.
+// SimpleIcons goes first because its CDN reliably sets CORS headers, so it
+// works where everything else fails behind a strict firewall.
 const SOURCES = [
+  {
+    name: 'SimpleIcons',
+    enabled: () => true,
+    url: ({ slug }) => (slug ? `https://cdn.simpleicons.org/${slug}` : null),
+  },
   {
     name: 'Brandfetch',
     enabled: () => !!CONFIG.brandfetchClientId,
-    url: (_, domain) =>
+    url: ({ domain }) =>
       domain
         ? `https://cdn.brandfetch.io/${domain}/w/512/h/512/symbol?c=${encodeURIComponent(CONFIG.brandfetchClientId)}`
         : null,
@@ -50,7 +72,7 @@ const SOURCES = [
   {
     name: 'logo.dev',
     enabled: () => !!CONFIG.logoDevToken,
-    url: (ticker, domain) => {
+    url: ({ ticker, domain }) => {
       const key = encodeURIComponent(CONFIG.logoDevToken);
       if (ticker) return `https://img.logo.dev/ticker/${ticker}?token=${key}&format=png&retina=true`;
       if (domain) return `https://img.logo.dev/${domain}?token=${key}&format=png&retina=true`;
@@ -60,17 +82,17 @@ const SOURCES = [
   {
     name: 'Clearbit',
     enabled: () => true,
-    url: (_, domain) => (domain ? `https://logo.clearbit.com/${domain}` : null),
+    url: ({ domain }) => (domain ? `https://logo.clearbit.com/${domain}` : null),
   },
   {
     name: 'DuckDuckGo',
     enabled: () => true,
-    url: (_, domain) => (domain ? `https://icons.duckduckgo.com/ip3/${domain}.ico` : null),
+    url: ({ domain }) => (domain ? `https://icons.duckduckgo.com/ip3/${domain}.ico` : null),
   },
   {
     name: 'Google',
     enabled: () => true,
-    url: (_, domain) =>
+    url: ({ domain }) =>
       domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=256` : null,
   },
 ];
@@ -139,7 +161,7 @@ async function runFetch(tickers) {
 
   for (const ticker of tickers) {
     const entry = TICKER_MAP[ticker] || {};
-    const card = createCard(ticker, entry.name || ticker, entry.domain || '');
+    const card = createCard(ticker, entry.name || ticker, entry.domain || '', entry.slug || '');
     cards.set(ticker, card);
     grid.appendChild(card.node);
   }
@@ -185,7 +207,13 @@ async function processWithConcurrency(items, fn, max) {
 
 // ─── Build pipeline: fetch icon → composite with name ────────────────────────
 async function buildLogo(card) {
-  const { result, log } = await fetchIcon(card.ticker, card.domain);
+  const ctx = {
+    ticker: card.ticker,
+    domain: card.domain,
+    name: card.name,
+    slug: card.slug || deriveSlug(card.name || card.ticker),
+  };
+  const { result, log } = await fetchIcon(ctx);
   if (!result) return { blob: null, source: null, log };
   try {
     const iconImg = await blobToImage(result.blob);
@@ -198,16 +226,16 @@ async function buildLogo(card) {
   }
 }
 
-async function fetchIcon(ticker, domain) {
+async function fetchIcon(ctx) {
   const log = [];
   for (const source of SOURCES) {
     if (!source.enabled()) {
       log.push({ source: source.name, status: 'skipped', detail: 'not configured' });
       continue;
     }
-    const url = source.url(ticker, domain);
+    const url = source.url(ctx);
     if (!url) {
-      log.push({ source: source.name, status: 'skipped', detail: 'no domain available' });
+      log.push({ source: source.name, status: 'skipped', detail: 'no usable input' });
       continue;
     }
 
@@ -342,13 +370,13 @@ function renderComposite(iconImg, name, color) {
 }
 
 // ─── Card rendering ──────────────────────────────────────────────────────────
-function createCard(ticker, name, domain) {
+function createCard(ticker, name, domain, slug) {
   const tpl = document.getElementById('card-template');
   const node = tpl.content.firstElementChild.cloneNode(true);
   node.querySelector('.ticker').textContent = ticker;
   node.querySelector('.name').textContent = name;
   node.querySelector('.source').textContent = domain || 'no domain mapped';
-  return { ticker, name, domain, node, blob: null, source: null, attempts: [] };
+  return { ticker, name, domain, slug, node, blob: null, source: null, attempts: [] };
 }
 
 function applyResult(card, blob, source) {
