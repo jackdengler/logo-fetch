@@ -7,8 +7,6 @@ const OUTPUT_DEFAULTS = {
   font: 'Segoe UI',
   fontSize: 12,        // points
   showName: true,
-  cellW: 1024,
-  cellH: 256,
   gridCols: 4,
   gridPad: 16,
 };
@@ -256,6 +254,10 @@ async function runFetch(tickers) {
   setStatus(`Fetching ${tickers.length} logo${tickers.length === 1 ? '' : 's'}…`);
 
   const grid = document.getElementById('results');
+  // Revoke object URLs from the previous run before dropping the cards.
+  for (const card of cards.values()) {
+    if (card._thumbUrl) URL.revokeObjectURL(card._thumbUrl);
+  }
   grid.innerHTML = '';
   cards.clear();
 
@@ -449,8 +451,13 @@ function blobToImage(blob) {
   });
 }
 
-// Pick the most prominent saturated color from the icon. Falls back to a
-// neutral dark grey if the icon is monochrome (e.g. pure black/white).
+// Name-text color used when the icon is monochrome (e.g. SimpleIcons silhouettes
+// are solid black) or its pixels can't be read. A neutral near-black reads as a
+// crisp logo wordmark on a light slide, rather than a muddy blue-grey.
+const MONOCHROME_TEXT = '#1a1a1a';
+
+// Pick the most prominent saturated color from the icon. Falls back to
+// MONOCHROME_TEXT if the icon is monochrome (e.g. pure black/white).
 function extractDominantColor(img) {
   const size = 64;
   const cvs = document.createElement('canvas');
@@ -462,7 +469,7 @@ function extractDominantColor(img) {
     data = ctx.getImageData(0, 0, size, size).data;
   } catch (_) {
     // Canvas tainted by cross-origin image without CORS → can't read pixels.
-    return '#1c1f26';
+    return MONOCHROME_TEXT;
   }
   const buckets = new Map();
   for (let i = 0; i < data.length; i += 4) {
@@ -474,7 +481,7 @@ function extractDominantColor(img) {
     const key = `${r >> 4}|${g >> 4}|${b >> 4}`;
     buckets.set(key, (buckets.get(key) || 0) + 1);
   }
-  if (buckets.size === 0) return '#1c1f26';
+  if (buckets.size === 0) return MONOCHROME_TEXT;
   let bestKey = null, bestCount = 0;
   for (const [k, v] of buckets) {
     if (v > bestCount) { bestKey = k; bestCount = v; }
@@ -565,8 +572,8 @@ function paintComposite(ctx, iconImg, name, color, x, y, m) {
   ctx.fillText(name, textX, y + m.cellH / 2);
 }
 
-// Render a single card to a transparent PNG. `nameOverride` lets the per-card
-// name toggle hide the name on just one card; pass null/empty for icon-only.
+// Render a single card to a transparent PNG. Pass null/empty `displayName`
+// for an icon-only output (used by the per-card name toggle).
 async function renderComposite(iconImg, displayName, color) {
   await ensureFontLoaded();
   const m = getMetrics(displayName);
@@ -586,12 +593,15 @@ async function renderComposite(iconImg, displayName, color) {
 // pipeline — we'd rather render in a system fallback than not at all.
 async function ensureFontLoaded() {
   if (!('fonts' in document)) return;
+  const px = Math.round(OUTPUT.fontSize * PT_TO_PX);
+  let timer;
   try {
     await Promise.race([
-      document.fonts.load(`700 ${OUTPUT.fontSize}px "${OUTPUT.font}"`),
-      new Promise((r) => setTimeout(r, 1200)),
+      document.fonts.load(`700 ${px}px "${OUTPUT.font}"`),
+      new Promise((r) => { timer = setTimeout(r, 1200); }),
     ]);
   } catch (_) { /* fallback handled by font stack */ }
+  finally { clearTimeout(timer); }
 }
 
 // ─── Card rendering ──────────────────────────────────────────────────────────
@@ -616,8 +626,23 @@ function createCard(ticker, name, domain, slug) {
 async function renderCardComposite(card) {
   if (!card.iconImg) return null;
   const displayName = card.showName ? (card.name || card.ticker) : null;
-  const blob = await renderComposite(card.iconImg, displayName, card.color || '#1c1f26');
+  const blob = await renderComposite(card.iconImg, displayName, card.color || MONOCHROME_TEXT);
   return blob;
+}
+
+// Swap a card's thumbnail image, revoking the previous object URL first so we
+// don't leak blob memory across re-renders (name toggles, settings re-renders,
+// "try next", etc. can each produce a fresh blob).
+function setThumbImage(card, blob) {
+  const thumb = card.node.querySelector('.thumb');
+  if (card._thumbUrl) URL.revokeObjectURL(card._thumbUrl);
+  card._thumbUrl = URL.createObjectURL(blob);
+  thumb.innerHTML = '';
+  const img = document.createElement('img');
+  img.alt = `${card.ticker} logo`;
+  img.src = card._thumbUrl;
+  thumb.appendChild(img);
+  return img;
 }
 
 function applyResult(card, blob, source) {
@@ -626,13 +651,8 @@ function applyResult(card, blob, source) {
   const node = card.node;
   node.dataset.state = 'ok';
 
-  // Swap thumbnail
-  const thumb = node.querySelector('.thumb');
-  thumb.innerHTML = '';
-  const img = document.createElement('img');
-  img.alt = `${card.ticker} logo`;
-  img.src = URL.createObjectURL(blob);
-  thumb.appendChild(img);
+  // Swap thumbnail (revokes any prior object URL)
+  setThumbImage(card, blob);
 
   node.querySelector('.source').textContent = `via ${source}`;
 
@@ -666,7 +686,7 @@ function applyResult(card, blob, source) {
     const newBlob = await renderCardComposite(card);
     if (newBlob) {
       card.blob = newBlob;
-      img.src = URL.createObjectURL(newBlob);
+      setThumbImage(card, newBlob);
     }
     freshToggle.disabled = false;
   });
@@ -679,7 +699,7 @@ function applyResult(card, blob, source) {
   freshNext.addEventListener('click', async () => {
     freshNext.disabled = true;
     node.dataset.state = 'loading';
-    thumb.innerHTML = '<div class="spinner"></div>';
+    node.querySelector('.thumb').innerHTML = '<div class="spinner"></div>';
     const out = await buildLogo(card, card.triedSourceIdxs);
     if (out.blob) {
       card.triedSourceIdxs.add(out.sourceIdx);
@@ -688,11 +708,7 @@ function applyResult(card, blob, source) {
     } else {
       // No more sources — restore the current good logo and let the user know.
       node.dataset.state = 'ok';
-      thumb.innerHTML = '';
-      const restoreImg = document.createElement('img');
-      restoreImg.alt = `${card.ticker} logo`;
-      restoreImg.src = URL.createObjectURL(card.blob);
-      thumb.appendChild(restoreImg);
+      setThumbImage(card, card.blob);
       flashButton(freshNext, 'No more sources');
     }
     freshNext.disabled = false;
@@ -804,7 +820,7 @@ async function buildGridBlob() {
     const x = pad + col * (m.cellW + pad);
     const y = pad + row * (m.cellH + pad);
     const displayName = card.showName ? (card.name || card.ticker) : null;
-    paintComposite(ctx, card.iconImg, displayName, card.color || '#1c1f26', x, y, m);
+    paintComposite(ctx, card.iconImg, displayName, card.color || MONOCHROME_TEXT, x, y, m);
   });
 
   return new Promise((resolve, reject) =>
@@ -812,20 +828,37 @@ async function buildGridBlob() {
   );
 }
 
+// Disable an export button while its (async) work runs, then restore it.
+// Prevents double-clicks kicking off overlapping canvas/zip builds.
+async function withButtonBusy(id, fn) {
+  const btn = document.getElementById(id);
+  const wasDisabled = btn ? btn.disabled : false;
+  if (btn) btn.disabled = true;
+  try {
+    return await fn();
+  } finally {
+    if (btn) btn.disabled = wasDisabled;
+  }
+}
+
 async function onGridClicked() {
-  setStatus('Building grid PNG…');
-  const blob = await buildGridBlob();
-  if (!blob) { setStatus('Nothing to grid — no logos succeeded.'); return; }
-  triggerDownload(blob, `logo-grid-${timestamp()}.png`);
-  setStatus(`Downloaded grid PNG (${blob.size.toLocaleString()} bytes).`);
+  await withButtonBusy('grid-btn', async () => {
+    setStatus('Building grid PNG…');
+    const blob = await buildGridBlob();
+    if (!blob) { setStatus('Nothing to grid — no logos succeeded.'); return; }
+    triggerDownload(blob, `logo-grid-${timestamp()}.png`);
+    setStatus(`Downloaded grid PNG (${blob.size.toLocaleString()} bytes).`);
+  });
 }
 
 async function onCopyGridClicked() {
-  setStatus('Building grid PNG…');
-  const blob = await buildGridBlob();
-  if (!blob) { setStatus('Nothing to grid — no logos succeeded.'); return; }
-  const ok = await copyBlobToClipboard(blob);
-  if (ok) setStatus('Grid PNG copied to clipboard.');
+  await withButtonBusy('copy-grid-btn', async () => {
+    setStatus('Building grid PNG…');
+    const blob = await buildGridBlob();
+    if (!blob) { setStatus('Nothing to grid — no logos succeeded.'); return; }
+    const ok = await copyBlobToClipboard(blob);
+    if (ok) setStatus('Grid PNG copied to clipboard.');
+  });
 }
 
 async function onZipClicked() {
@@ -833,16 +866,18 @@ async function onZipClicked() {
     setStatus('ZIP library not loaded yet — try again in a moment.');
     return;
   }
-  const zip = new JSZip();
-  let added = 0;
-  for (const card of cards.values()) {
-    if (card.blob) { zip.file(`${card.ticker}.png`, card.blob); added++; }
-  }
-  if (!added) { setStatus('Nothing to bundle — no logos succeeded.'); return; }
-  setStatus(`Building ZIP with ${added} logo${added === 1 ? '' : 's'}…`);
-  const blob = await zip.generateAsync({ type: 'blob' });
-  triggerDownload(blob, `logos-${timestamp()}.zip`);
-  setStatus(`Downloaded ${added} logo${added === 1 ? '' : 's'}.`);
+  await withButtonBusy('zip-btn', async () => {
+    const zip = new JSZip();
+    let added = 0;
+    for (const card of cards.values()) {
+      if (card.blob) { zip.file(`${card.ticker}.png`, card.blob); added++; }
+    }
+    if (!added) { setStatus('Nothing to bundle — no logos succeeded.'); return; }
+    setStatus(`Building ZIP with ${added} logo${added === 1 ? '' : 's'}…`);
+    const blob = await zip.generateAsync({ type: 'blob' });
+    triggerDownload(blob, `logos-${timestamp()}.zip`);
+    setStatus(`Downloaded ${added} logo${added === 1 ? '' : 's'}.`);
+  });
 }
 
 function triggerDownload(blob, filename) {
