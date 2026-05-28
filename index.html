@@ -4,12 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ticker → Logo Fetch</title>
+  <link rel="preconnect" href="https://fonts.cdnfonts.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.cdnfonts.com/css/segoe-ui-4" />
+  <link rel="stylesheet" href="https://fonts.cdnfonts.com/css/aptos" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header>
     <h1>Ticker → Logo Fetch</h1>
     <p class="sub">Paste tickers, get transparent PNGs of each company's icon with its name beside it. The text colour is sampled from the icon.</p>
+    <p class="version" id="version">Last code update: checking…</p>
   </header>
 
   <main>
@@ -24,28 +28,72 @@
       ></textarea>
       <div class="controls">
         <button id="fetch-btn" type="button">Fetch logos</button>
-        <button id="zip-btn" type="button" disabled>Download all as ZIP</button>
+        <button id="zip-btn" type="button" disabled>Download ZIP</button>
+        <button id="grid-btn" type="button" disabled>Download grid PNG</button>
         <button id="settings-toggle" type="button" class="ghost">Settings</button>
         <span id="status" class="status"></span>
       </div>
 
       <details id="settings" class="settings">
-        <summary>Wordmark providers (optional — improves logo quality)</summary>
-        <p class="hint">
-          By default this site uses Clearbit + DuckDuckGo + Google as icon sources.
-          Adding a token from Brandfetch or logo.dev gives you sharper, higher-res
-          icons (Google favicons are small). Tokens are stored in your browser only.
-        </p>
-        <div class="setting-row">
-          <label for="brandfetch-id">Brandfetch clientId</label>
-          <input id="brandfetch-id" type="text" placeholder="from developers.brandfetch.com" spellcheck="false" autocomplete="off" />
+        <summary>Output &amp; export settings</summary>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Composite output</div>
+          <div class="setting-row">
+            <label for="opt-font">Font</label>
+            <select id="opt-font">
+              <option value="Segoe UI">Segoe UI</option>
+              <option value="Aptos">Aptos</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label for="opt-font-size">Font size (px)</label>
+            <input id="opt-font-size" type="number" min="16" max="400" step="2" />
+          </div>
+          <div class="setting-row">
+            <label for="opt-show-name">Show name beside icon</label>
+            <input id="opt-show-name" type="checkbox" />
+          </div>
+          <div class="setting-row">
+            <label for="opt-cell-w">Output width (px)</label>
+            <input id="opt-cell-w" type="number" min="128" max="4096" step="32" />
+          </div>
+          <div class="setting-row">
+            <label for="opt-cell-h">Output height (px)</label>
+            <input id="opt-cell-h" type="number" min="64" max="2048" step="16" />
+          </div>
         </div>
-        <div class="setting-row">
-          <label for="logodev-token">logo.dev token (pk_…)</label>
-          <input id="logodev-token" type="text" placeholder="from www.logo.dev" spellcheck="false" autocomplete="off" />
+
+        <div class="settings-section">
+          <div class="settings-section-title">Grid PNG export</div>
+          <div class="setting-row">
+            <label for="opt-grid-cols">Columns</label>
+            <input id="opt-grid-cols" type="number" min="1" max="12" step="1" />
+          </div>
+          <div class="setting-row">
+            <label for="opt-grid-pad">Cell padding (px)</label>
+            <input id="opt-grid-pad" type="number" min="0" max="256" step="2" />
+          </div>
         </div>
+
+        <details class="nested-settings">
+          <summary>Wordmark providers (optional API keys)</summary>
+          <p class="hint">
+            Adding a token from Brandfetch or logo.dev gives sharper icons. Tokens
+            are stored in your browser only (localStorage).
+          </p>
+          <div class="setting-row">
+            <label for="brandfetch-id">Brandfetch clientId</label>
+            <input id="brandfetch-id" type="text" placeholder="from developers.brandfetch.com" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="setting-row">
+            <label for="logodev-token">logo.dev token (pk_…)</label>
+            <input id="logodev-token" type="text" placeholder="from www.logo.dev" spellcheck="false" autocomplete="off" />
+          </div>
+        </details>
+
         <div class="setting-row">
-          <button id="save-settings" type="button">Save</button>
+          <button id="save-settings" type="button">Save &amp; re-render</button>
           <span id="settings-status" class="status"></span>
         </div>
       </details>
@@ -83,6 +131,6 @@
   </template>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
-  <script src="app.js?v=7" defer></script>
+  <script src="app.js?v=8" defer></script>
 </body>
 </html>

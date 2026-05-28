@@ -1,21 +1,38 @@
 // ─── Config ──────────────────────────────────────────────────────────────────
 // Tokens are persisted in localStorage from the in-page Settings panel.
+const OUTPUT_DEFAULTS = {
+  font: 'Segoe UI',
+  fontSize: 110,
+  showName: true,
+  cellW: 1024,
+  cellH: 256,
+  gridCols: 4,
+  gridPad: 16,
+};
+const OUTPUT = loadOutputSettings();
+
+function loadOutputSettings() {
+  try {
+    const raw = localStorage.getItem('output');
+    if (raw) return { ...OUTPUT_DEFAULTS, ...JSON.parse(raw) };
+  } catch (_) { /* ignore */ }
+  return { ...OUTPUT_DEFAULTS };
+}
+
+function fontStack(name) {
+  // Always end with a system fallback so the canvas renders something even if
+  // the webfont didn't load or isn't installed locally.
+  return `"${name}", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
+}
+
 const CONFIG = {
   brandfetchClientId: localStorage.getItem('brandfetchClientId') || '',
   logoDevToken: localStorage.getItem('logoDevToken') || '',
   concurrency: 3,
   minBlobBytes: 200,
   retryDelayMs: 400,
-  // Final composite canvas dimensions
-  canvas: {
-    W: 1024,
-    H: 256,
-    iconBox: 200,
-    pad: 28,
-    maxFont: 130,
-    minFont: 28,
-    fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-  },
+  // Repo metadata for the "last updated" indicator
+  repo: { owner: 'jackdengler', name: 'logo-fetch' },
   // Public CORS proxies, tried in order if direct fetch is blocked. These
   // all add Access-Control-Allow-Origin: * to whatever they relay, which
   // lets us read the image bytes back into a Blob.
@@ -117,6 +134,7 @@ async function init() {
   }
   document.getElementById('fetch-btn').addEventListener('click', onFetchClicked);
   document.getElementById('zip-btn').addEventListener('click', onZipClicked);
+  document.getElementById('grid-btn').addEventListener('click', onGridClicked);
   document.getElementById('tickers').addEventListener('keydown', (e) => {
     // Enter fetches; Shift+Enter inserts a newline if you're pasting a list.
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -129,9 +147,30 @@ async function init() {
     const s = document.getElementById('settings');
     s.open = !s.open;
   });
+
+  // Populate every settings input from the saved/default values.
+  document.getElementById('opt-font').value = OUTPUT.font;
+  document.getElementById('opt-font-size').value = OUTPUT.fontSize;
+  document.getElementById('opt-show-name').checked = OUTPUT.showName;
+  document.getElementById('opt-cell-w').value = OUTPUT.cellW;
+  document.getElementById('opt-cell-h').value = OUTPUT.cellH;
+  document.getElementById('opt-grid-cols').value = OUTPUT.gridCols;
+  document.getElementById('opt-grid-pad').value = OUTPUT.gridPad;
   document.getElementById('brandfetch-id').value = CONFIG.brandfetchClientId;
   document.getElementById('logodev-token').value = CONFIG.logoDevToken;
-  document.getElementById('save-settings').addEventListener('click', () => {
+
+  document.getElementById('save-settings').addEventListener('click', async () => {
+    // Output settings
+    OUTPUT.font = document.getElementById('opt-font').value;
+    OUTPUT.fontSize = Math.max(16, parseInt(document.getElementById('opt-font-size').value, 10) || OUTPUT_DEFAULTS.fontSize);
+    OUTPUT.showName = document.getElementById('opt-show-name').checked;
+    OUTPUT.cellW = Math.max(128, parseInt(document.getElementById('opt-cell-w').value, 10) || OUTPUT_DEFAULTS.cellW);
+    OUTPUT.cellH = Math.max(64, parseInt(document.getElementById('opt-cell-h').value, 10) || OUTPUT_DEFAULTS.cellH);
+    OUTPUT.gridCols = Math.max(1, parseInt(document.getElementById('opt-grid-cols').value, 10) || OUTPUT_DEFAULTS.gridCols);
+    OUTPUT.gridPad = Math.max(0, parseInt(document.getElementById('opt-grid-pad').value, 10) || 0);
+    localStorage.setItem('output', JSON.stringify(OUTPUT));
+
+    // API tokens
     const bf = document.getElementById('brandfetch-id').value.trim();
     const ld = document.getElementById('logodev-token').value.trim();
     CONFIG.brandfetchClientId = bf;
@@ -140,10 +179,49 @@ async function init() {
     else localStorage.removeItem('brandfetchClientId');
     if (ld) localStorage.setItem('logoDevToken', ld);
     else localStorage.removeItem('logoDevToken');
+
     const status = document.getElementById('settings-status');
+    status.textContent = 'Saved. Re-rendering…';
+    await reRenderAll();
     status.textContent = 'Saved.';
     setTimeout(() => (status.textContent = ''), 1500);
   });
+
+  showLastCommit();
+}
+
+// Fetches the latest commit on `main` from the GitHub REST API and renders
+// a small "Last code update: …" line in the header. Lets the user know
+// they're on the version they think they are.
+async function showLastCommit() {
+  const el = document.getElementById('version');
+  if (!el) return;
+  const { owner, name } = CONFIG.repo;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${owner}/${name}/commits/main`, {
+      headers: { Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const date = new Date(data.commit.author.date);
+    const sha = (data.sha || '').slice(0, 7);
+    const url = `https://github.com/${owner}/${name}/commit/${data.sha}`;
+    el.innerHTML = `Last code update: ${relativeTime(date)} &middot; <a href="${url}" target="_blank" rel="noopener">${sha}</a>`;
+  } catch (err) {
+    el.textContent = `Last code update: unknown (${err.message})`;
+  }
+}
+
+function relativeTime(d) {
+  const sec = Math.round((Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr} hr ago`;
+  const day = Math.round(hr / 24);
+  if (day < 30) return `${day} day${day === 1 ? '' : 's'} ago`;
+  return d.toISOString().slice(0, 10);
 }
 
 // ─── Input handling ──────────────────────────────────────────────────────────
@@ -205,7 +283,10 @@ async function runFetch(tickers) {
   }
   setStatus(statusMsg);
   document.getElementById('fetch-btn').disabled = false;
-  if (okCount > 0) document.getElementById('zip-btn').disabled = false;
+  if (okCount > 0) {
+    document.getElementById('zip-btn').disabled = false;
+    document.getElementById('grid-btn').disabled = false;
+  }
 }
 
 async function processWithConcurrency(items, fn, max) {
@@ -232,12 +313,32 @@ async function buildLogo(card) {
   try {
     const iconImg = await blobToImage(result.blob);
     const color = extractDominantColor(iconImg);
+    // Cache on the card so a settings change can re-composite without re-fetch.
+    card.iconImg = iconImg;
+    card.color = color;
     const composedBlob = await renderComposite(iconImg, card.name || card.ticker, color);
     return { blob: composedBlob, source: result.source, log };
   } catch (err) {
     log.push({ source: 'composite', status: 'error', detail: err.message || 'compose failed' });
     return { blob: null, source: null, log };
   }
+}
+
+// Re-composite every card that already has a decoded icon, using the current
+// OUTPUT settings. Used by the Settings panel's Save button.
+async function reRenderAll() {
+  setStatus('Re-rendering with new settings…');
+  await ensureFontLoaded();
+  for (const card of cards.values()) {
+    if (!card.iconImg) continue;
+    try {
+      const blob = await renderComposite(card.iconImg, card.name || card.ticker, card.color || '#1c1f26');
+      applyResult(card, blob, card.source || 'cached');
+    } catch (err) {
+      console.error('re-render', card.ticker, err);
+    }
+  }
+  setStatus(`Re-rendered ${[...cards.values()].filter((c) => c.iconImg).length} card(s).`);
 }
 
 async function fetchIcon(ctx) {
@@ -353,39 +454,66 @@ function extractDominantColor(img) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-function renderComposite(iconImg, name, color) {
-  const { W, H, iconBox, pad, maxFont, minFont, fontFamily } = CONFIG.canvas;
+// Render the composite directly onto a destination context. Used both by the
+// per-card export (one card per canvas) and by the grid export (many cards
+// onto a single big canvas).
+function paintComposite(ctx, iconImg, name, color, x, y, cellW, cellH, showName) {
+  const pad = Math.max(8, Math.round(cellH * 0.1));
+  const iconBox = showName
+    ? Math.min(cellH - pad * 2, Math.round(cellW * 0.22))
+    : Math.min(cellH - pad * 2, cellW - pad * 2);
+
+  // Icon, aspect-preserving, centred either on the left (with name) or in
+  // the whole cell (icon-only).
+  const ratio = Math.min(iconBox / iconImg.width, iconBox / iconImg.height);
+  const iw = iconImg.width * ratio;
+  const ih = iconImg.height * ratio;
+  const ix = showName
+    ? x + pad + (iconBox - iw) / 2
+    : x + (cellW - iw) / 2;
+  const iy = y + (cellH - ih) / 2;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(iconImg, ix, iy, iw, ih);
+
+  if (!showName) return;
+
+  // Name beside it: try the user's requested font size first, then shrink to
+  // fit if it would overflow the available width.
+  const textX = x + pad + iconBox + pad;
+  const maxTextWidth = x + cellW - textX - pad;
+  ctx.fillStyle = color;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  let fontSize = Math.max(12, OUTPUT.fontSize);
+  while (fontSize > 12) {
+    ctx.font = `700 ${fontSize}px ${fontStack(OUTPUT.font)}`;
+    if (ctx.measureText(name).width <= maxTextWidth) break;
+    fontSize -= 4;
+  }
+  ctx.fillText(name, textX, y + cellH / 2);
+}
+
+async function renderComposite(iconImg, name, color) {
+  await ensureFontLoaded();
+  const W = OUTPUT.cellW;
+  const H = OUTPUT.cellH;
   const cvs = document.createElement('canvas');
   cvs.width = W; cvs.height = H;
   const ctx = cvs.getContext('2d');
   ctx.clearRect(0, 0, W, H);
-
-  // Icon, aspect-preserving, centred in its box
-  const ratio = Math.min(iconBox / iconImg.width, iconBox / iconImg.height);
-  const iw = iconImg.width * ratio;
-  const ih = iconImg.height * ratio;
-  const ix = pad + (iconBox - iw) / 2;
-  const iy = (H - ih) / 2;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(iconImg, ix, iy, iw, ih);
-
-  // Name beside it, sampled colour, shrink-to-fit
-  const textX = pad + iconBox + pad;
-  const maxTextWidth = W - textX - pad;
-  ctx.fillStyle = color;
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'left';
-  let fontSize = maxFont;
-  while (fontSize > minFont) {
-    ctx.font = `700 ${fontSize}px ${fontFamily}`;
-    if (ctx.measureText(name).width <= maxTextWidth) break;
-    fontSize -= 4;
-  }
-  ctx.fillText(name, textX, H / 2);
-
+  paintComposite(ctx, iconImg, name, color, 0, 0, W, H, OUTPUT.showName);
   return new Promise((resolve, reject) =>
     cvs.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png')
   );
+}
+
+// Ensure the current OUTPUT.font is loaded before drawing. Canvas silently
+// falls back to a default font if you try to draw with an unloaded face.
+async function ensureFontLoaded() {
+  if (!('fonts' in document)) return;
+  try {
+    await document.fonts.load(`700 ${OUTPUT.fontSize}px "${OUTPUT.font}"`);
+  } catch (_) { /* fallback handled by font stack */ }
 }
 
 // ─── Card rendering ──────────────────────────────────────────────────────────
@@ -471,6 +599,34 @@ function escapeHtml(s) {
 }
 
 // ─── ZIP export ──────────────────────────────────────────────────────────────
+async function onGridClicked() {
+  const ready = [...cards.values()].filter((c) => c.iconImg);
+  if (!ready.length) { setStatus('Nothing to grid — no logos succeeded.'); return; }
+  setStatus(`Building grid PNG (${ready.length} logos)…`);
+  await ensureFontLoaded();
+  const { cellW, cellH, gridCols, gridPad, showName } = OUTPUT;
+  const cols = Math.min(gridCols, ready.length);
+  const rows = Math.ceil(ready.length / cols);
+  const W = cols * cellW + (cols + 1) * gridPad;
+  const H = rows * cellH + (rows + 1) * gridPad;
+  const cvs = document.createElement('canvas');
+  cvs.width = W; cvs.height = H;
+  const ctx = cvs.getContext('2d');
+  ctx.clearRect(0, 0, W, H); // transparent background
+  ready.forEach((card, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = gridPad + col * (cellW + gridPad);
+    const y = gridPad + row * (cellH + gridPad);
+    paintComposite(ctx, card.iconImg, card.name || card.ticker, card.color || '#1c1f26', x, y, cellW, cellH, showName);
+  });
+  const blob = await new Promise((resolve, reject) =>
+    cvs.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png')
+  );
+  triggerDownload(blob, `logo-grid-${timestamp()}.png`);
+  setStatus(`Downloaded grid (${cols}×${rows}, ${W}×${H}px).`);
+}
+
 async function onZipClicked() {
   if (typeof JSZip === 'undefined') {
     setStatus('ZIP library not loaded yet — try again in a moment.');
