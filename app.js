@@ -15,6 +15,13 @@ const CONFIG = {
     minFont: 28,
     fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
+  // Public CORS proxies, tried in order if direct fetch is blocked. These
+  // all add Access-Control-Allow-Origin: * to whatever they relay, which
+  // lets us read the image bytes back into a Blob.
+  proxies: [
+    (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  ],
 };
 
 // ─── Source chain ────────────────────────────────────────────────────────────
@@ -139,7 +146,17 @@ async function runFetch(tickers) {
     }
   }, CONFIG.concurrency);
 
-  setStatus(`Done. ${okCount}/${tickers.length} succeeded.`);
+  let statusMsg = `Done. ${okCount}/${tickers.length} succeeded.`;
+  if (okCount === 0) {
+    // Surface the most useful failure reason inline so the user doesn't
+    // have to expand a card to see why everything failed.
+    const firstCard = [...cards.values()].find((c) => c.attempts.length > 0);
+    if (firstCard) {
+      const lastErr = firstCard.attempts[firstCard.attempts.length - 1];
+      statusMsg += ` Last error: ${lastErr.source} ${lastErr.status} — ${lastErr.detail}`;
+    }
+  }
+  setStatus(statusMsg);
   document.getElementById('fetch-btn').disabled = false;
   if (okCount > 0) document.getElementById('zip-btn').disabled = false;
 }
@@ -182,26 +199,45 @@ async function fetchIcon(ticker, domain) {
       log.push({ source: source.name, status: 'skipped', detail: 'no domain available' });
       continue;
     }
-    try {
-      const res = await fetch(url, { mode: 'cors', cache: 'no-store', redirect: 'follow' });
-      if (!res.ok) {
-        log.push({ source: source.name, status: 'http', detail: `HTTP ${res.status}`, url });
-        continue;
+
+    // Try direct fetch first, then each CORS proxy. First success wins for
+    // this source — if all fail, fall through to the next source.
+    const attempts = [
+      { label: 'direct', url },
+      ...CONFIG.proxies.map((p, i) => ({ label: `proxy${i + 1}`, url: p(url) })),
+    ];
+
+    let gotBlob = null;
+    let gotVia = null;
+    for (const attempt of attempts) {
+      try {
+        const res = await fetch(attempt.url, { mode: 'cors', cache: 'no-store', redirect: 'follow' });
+        if (!res.ok) {
+          log.push({ source: source.name, status: `${attempt.label} http`, detail: `HTTP ${res.status}` });
+          continue;
+        }
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.startsWith('image/')) {
+          log.push({ source: source.name, status: `${attempt.label} bad-type`, detail: ct || 'none' });
+          continue;
+        }
+        const blob = await res.blob();
+        if (blob.size < CONFIG.minBlobBytes) {
+          log.push({ source: source.name, status: `${attempt.label} too-small`, detail: `${blob.size} bytes` });
+          continue;
+        }
+        gotBlob = blob;
+        gotVia = attempt.label;
+        log.push({ source: source.name, status: 'ok', detail: `${blob.size} bytes via ${attempt.label}` });
+        break;
+      } catch (err) {
+        log.push({ source: source.name, status: `${attempt.label} error`, detail: err.message || 'fetch failed' });
       }
-      const ct = res.headers.get('content-type') || '';
-      if (!ct.startsWith('image/')) {
-        log.push({ source: source.name, status: 'bad-type', detail: `content-type: ${ct || 'none'}`, url });
-        continue;
-      }
-      const blob = await res.blob();
-      if (blob.size < CONFIG.minBlobBytes) {
-        log.push({ source: source.name, status: 'too-small', detail: `${blob.size} bytes`, url });
-        continue;
-      }
-      log.push({ source: source.name, status: 'ok', detail: `${blob.size} bytes`, url });
-      return { result: { blob, source: source.name }, log };
-    } catch (err) {
-      log.push({ source: source.name, status: 'error', detail: err.message || 'fetch failed (likely CORS)', url });
+    }
+
+    if (gotBlob) {
+      const sourceLabel = gotVia === 'direct' ? source.name : `${source.name} (${gotVia})`;
+      return { result: { blob: gotBlob, source: sourceLabel }, log };
     }
   }
   return { result: null, log };
@@ -360,6 +396,7 @@ function applyError(card) {
     list.appendChild(li);
   }
   details.hidden = card.attempts.length === 0;
+  details.open = card.attempts.length > 0; // expand by default on failure
 }
 
 function escapeHtml(s) {
