@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ticker → Logo Fetch</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Ticker → Logo Fetch</h1>
+    <p class="sub">Paste tickers, get transparent PNG logos. Wordmark (logo + name) preferred when available.</p>
+  </header>
+
+  <main>
+    <section class="input-panel">
+      <label for="tickers">Tickers</label>
+      <textarea
+        id="tickers"
+        rows="4"
+        placeholder="AAPL, MSFT, GOOGL&#10;NVDA TSLA JPM"
+        spellcheck="false"
+        autocomplete="off"
+      ></textarea>
+      <div class="controls">
+        <button id="fetch-btn" type="button">Fetch logos</button>
+        <button id="zip-btn" type="button" disabled>Download all as ZIP</button>
+        <span id="status" class="status"></span>
+      </div>
+    </section>
+
+    <section id="results" class="results" aria-live="polite"></section>
+  </main>
+
+  <footer>
+    <small>
+      Sources tried in order: Brandfetch CDN → logo.dev → Clearbit. Background transparency is
+      whatever the source ships — no post-processing.
+    </small>
+  </footer>
+
+  <template id="card-template">
+    <article class="card" data-state="loading">
+      <div class="thumb"><div class="spinner"></div></div>
+      <div class="meta">
+        <div class="ticker"></div>
+        <div class="name"></div>
+        <div class="source"></div>
+      </div>
+      <div class="actions">
+        <button class="download" type="button" disabled>Download</button>
+        <input class="manual-domain" type="text" placeholder="domain.com" hidden />
+        <button class="retry" type="button" hidden>Retry</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
+  <script src="app.js" defer></script>
+</body>
+</html>
