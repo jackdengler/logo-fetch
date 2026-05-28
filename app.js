@@ -22,7 +22,18 @@ const CONFIG = {
     (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
     (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   ],
+  fetchTimeoutMs: 6000,
 };
+
+// AbortController wrapper so a hung CDN doesn't leave the whole batch
+// spinning forever. Rejects with a normal Error so the caller's try/catch
+// handles it the same as any other fetch failure.
+function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG.fetchTimeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timer));
+}
 
 // ─── Source chain ────────────────────────────────────────────────────────────
 // Always fetching an *icon* (symbol-only) — the company name is drawn beside
@@ -211,14 +222,16 @@ async function fetchIcon(ticker, domain) {
     let gotVia = null;
     for (const attempt of attempts) {
       try {
-        const res = await fetch(attempt.url, { mode: 'cors', cache: 'no-store', redirect: 'follow' });
+        const res = await fetchWithTimeout(attempt.url, { mode: 'cors', cache: 'no-store', redirect: 'follow' });
         if (!res.ok) {
           log.push({ source: source.name, status: `${attempt.label} http`, detail: `HTTP ${res.status}` });
           continue;
         }
         const ct = res.headers.get('content-type') || '';
-        if (!ct.startsWith('image/')) {
-          log.push({ source: source.name, status: `${attempt.label} bad-type`, detail: ct || 'none' });
+        // Some proxies strip / lie about content-type — only reject if it's
+        // explicitly text or json. Treat empty / octet-stream as maybe-image.
+        if (ct && !ct.startsWith('image/') && !ct.startsWith('application/octet-stream')) {
+          log.push({ source: source.name, status: `${attempt.label} bad-type`, detail: ct });
           continue;
         }
         const blob = await res.blob();
@@ -231,7 +244,10 @@ async function fetchIcon(ticker, domain) {
         log.push({ source: source.name, status: 'ok', detail: `${blob.size} bytes via ${attempt.label}` });
         break;
       } catch (err) {
-        log.push({ source: source.name, status: `${attempt.label} error`, detail: err.message || 'fetch failed' });
+        const detail = err.name === 'AbortError'
+          ? `timeout after ${CONFIG.fetchTimeoutMs}ms`
+          : err.message || 'fetch failed';
+        log.push({ source: source.name, status: `${attempt.label} error`, detail });
       }
     }
 
@@ -248,8 +264,10 @@ function blobToImage(blob) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
     const img = new Image();
-    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-    img.onerror = (e) => { URL.revokeObjectURL(url); reject(new Error('image decode failed')); };
+    const cleanup = () => URL.revokeObjectURL(url);
+    const safety = setTimeout(() => { cleanup(); reject(new Error('image decode timeout')); }, 5000);
+    img.onload = () => { clearTimeout(safety); cleanup(); resolve(img); };
+    img.onerror = () => { clearTimeout(safety); cleanup(); reject(new Error('image decode failed')); };
     img.src = url;
   });
 }
