@@ -28,8 +28,9 @@
       ></textarea>
       <div class="controls">
         <button id="fetch-btn" type="button">Fetch logos</button>
-        <button id="zip-btn" type="button" disabled>Download ZIP</button>
-        <button id="grid-btn" type="button" disabled>Download grid PNG</button>
+        <button id="copy-grid-btn" type="button" disabled>Copy grid</button>
+        <button id="grid-btn" type="button" disabled class="ghost">Download grid PNG</button>
+        <button id="zip-btn" type="button" disabled class="ghost">Download ZIP</button>
         <button id="settings-toggle" type="button" class="ghost">Settings</button>
         <span id="status" class="status"></span>
       </div>
@@ -47,21 +48,14 @@
             </select>
           </div>
           <div class="setting-row">
-            <label for="opt-font-size">Font size (px)</label>
-            <input id="opt-font-size" type="number" min="16" max="400" step="2" />
+            <label for="opt-font-size">Font size (pt)</label>
+            <input id="opt-font-size" type="number" min="6" max="200" step="1" />
           </div>
           <div class="setting-row">
             <label for="opt-show-name">Show name beside icon</label>
             <input id="opt-show-name" type="checkbox" />
           </div>
-          <div class="setting-row">
-            <label for="opt-cell-w">Output width (px)</label>
-            <input id="opt-cell-w" type="number" min="128" max="4096" step="32" />
-          </div>
-          <div class="setting-row">
-            <label for="opt-cell-h">Output height (px)</label>
-            <input id="opt-cell-h" type="number" min="64" max="2048" step="16" />
-          </div>
+          <p class="hint">Icon size auto-matches the font height; output canvas auto-fits to icon + name with optical padding.</p>
         </div>
 
         <div class="settings-section">
@@ -119,7 +113,14 @@
         <div class="source"></div>
       </div>
       <div class="actions">
-        <button class="download" type="button" disabled>Download</button>
+        <div class="action-row">
+          <button class="copy" type="button" disabled title="Copy PNG to clipboard">Copy</button>
+          <button class="download ghost" type="button" disabled title="Download PNG">Download</button>
+        </div>
+        <div class="action-row sub">
+          <button class="toggle-name ghost" type="button" disabled title="Show or hide the company name in this card's output">Hide name</button>
+          <button class="next-source ghost" type="button" disabled title="Try the next available logo source">Try next</button>
+        </div>
         <input class="manual-domain" type="text" placeholder="domain.com" hidden />
         <button class="retry" type="button" hidden>Retry</button>
         <details class="attempts" hidden>
@@ -131,6 +132,6 @@
   </template>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
-  <script src="app.js?v=9" defer></script>
+  <script src="app.js?v=10" defer></script>
 </body>
 </html>

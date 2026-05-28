@@ -1,8 +1,11 @@
 // ─── Config ──────────────────────────────────────────────────────────────────
 // Tokens are persisted in localStorage from the in-page Settings panel.
+// fontSize is in *points* (like PowerPoint / Excel / Word), not CSS pixels.
+// Converted to canvas pixels via PT_TO_PX = 4/3 at draw time.
+const PT_TO_PX = 4 / 3;
 const OUTPUT_DEFAULTS = {
   font: 'Segoe UI',
-  fontSize: 110,
+  fontSize: 12,        // points
   showName: true,
   cellW: 1024,
   cellH: 256,
@@ -12,8 +15,10 @@ const OUTPUT_DEFAULTS = {
 const OUTPUT = loadOutputSettings();
 
 function loadOutputSettings() {
+  // Bumped key when fontSize semantics changed from px to pt so old saved
+  // values (e.g. 110 = 110px) don't render as huge 110pt fonts.
   try {
-    const raw = localStorage.getItem('output');
+    const raw = localStorage.getItem('output_v2');
     if (raw) return { ...OUTPUT_DEFAULTS, ...JSON.parse(raw) };
   } catch (_) { /* ignore */ }
   return { ...OUTPUT_DEFAULTS };
@@ -110,8 +115,12 @@ const SOURCES = [
   {
     name: 'Google',
     enabled: () => true,
-    url: ({ domain }) =>
-      domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=256` : null,
+    url: ({ domain }) => {
+      if (!domain) return null;
+      // Chrome's internal favicon endpoint, served from Google's CDN (gstatic).
+      // Generally has more permissive CORS than the legacy s2/favicons URL.
+      return `https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://${domain}&size=256`;
+    },
   },
 ];
 
@@ -135,6 +144,7 @@ async function init() {
   document.getElementById('fetch-btn').addEventListener('click', onFetchClicked);
   document.getElementById('zip-btn').addEventListener('click', onZipClicked);
   document.getElementById('grid-btn').addEventListener('click', onGridClicked);
+  document.getElementById('copy-grid-btn').addEventListener('click', onCopyGridClicked);
   document.getElementById('tickers').addEventListener('keydown', (e) => {
     // Enter fetches; Shift+Enter inserts a newline if you're pasting a list.
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -152,23 +162,26 @@ async function init() {
   document.getElementById('opt-font').value = OUTPUT.font;
   document.getElementById('opt-font-size').value = OUTPUT.fontSize;
   document.getElementById('opt-show-name').checked = OUTPUT.showName;
-  document.getElementById('opt-cell-w').value = OUTPUT.cellW;
-  document.getElementById('opt-cell-h').value = OUTPUT.cellH;
   document.getElementById('opt-grid-cols').value = OUTPUT.gridCols;
   document.getElementById('opt-grid-pad').value = OUTPUT.gridPad;
   document.getElementById('brandfetch-id').value = CONFIG.brandfetchClientId;
   document.getElementById('logodev-token').value = CONFIG.logoDevToken;
 
   document.getElementById('save-settings').addEventListener('click', async () => {
-    // Output settings
     OUTPUT.font = document.getElementById('opt-font').value;
-    OUTPUT.fontSize = Math.max(16, parseInt(document.getElementById('opt-font-size').value, 10) || OUTPUT_DEFAULTS.fontSize);
+    OUTPUT.fontSize = Math.max(6, parseInt(document.getElementById('opt-font-size').value, 10) || OUTPUT_DEFAULTS.fontSize);
+    const wasShowName = OUTPUT.showName;
     OUTPUT.showName = document.getElementById('opt-show-name').checked;
-    OUTPUT.cellW = Math.max(128, parseInt(document.getElementById('opt-cell-w').value, 10) || OUTPUT_DEFAULTS.cellW);
-    OUTPUT.cellH = Math.max(64, parseInt(document.getElementById('opt-cell-h').value, 10) || OUTPUT_DEFAULTS.cellH);
     OUTPUT.gridCols = Math.max(1, parseInt(document.getElementById('opt-grid-cols').value, 10) || OUTPUT_DEFAULTS.gridCols);
     OUTPUT.gridPad = Math.max(0, parseInt(document.getElementById('opt-grid-pad').value, 10) || 0);
-    localStorage.setItem('output', JSON.stringify(OUTPUT));
+    localStorage.setItem('output_v2', JSON.stringify(OUTPUT));
+
+    // If the global Show-name toggle flipped, apply it to every card. This
+    // gives users a one-click "name everywhere / no name anywhere" switch
+    // while still preserving the per-card overrides made afterwards.
+    if (OUTPUT.showName !== wasShowName) {
+      for (const card of cards.values()) card.showName = OUTPUT.showName;
+    }
 
     // API tokens
     const bf = document.getElementById('brandfetch-id').value.trim();
@@ -239,8 +252,7 @@ function onFetchClicked() {
 
 async function runFetch(tickers) {
   const runId = ++currentRunId;
-  document.getElementById('fetch-btn').disabled = true;
-  document.getElementById('zip-btn').disabled = true;
+  setControlsBusy(true);
   setStatus(`Fetching ${tickers.length} logo${tickers.length === 1 ? '' : 's'}…`);
 
   const grid = document.getElementById('results');
@@ -263,6 +275,8 @@ async function runFetch(tickers) {
     card.attempts = out.log;
     if (out.blob) {
       okCount++;
+      card.triedSourceIdxs.add(out.sourceIdx);
+      card.sourceIdx = out.sourceIdx;
       applyResult(card, out.blob, out.source);
     } else {
       applyError(card);
@@ -273,8 +287,6 @@ async function runFetch(tickers) {
 
   let statusMsg = `Done. ${okCount}/${tickers.length} succeeded.`;
   if (okCount === 0) {
-    // Surface the most useful failure reason inline so the user doesn't
-    // have to expand a card to see why everything failed.
     const firstCard = [...cards.values()].find((c) => c.attempts.length > 0);
     if (firstCard) {
       const lastErr = firstCard.attempts[firstCard.attempts.length - 1];
@@ -286,6 +298,14 @@ async function runFetch(tickers) {
   if (okCount > 0) {
     document.getElementById('zip-btn').disabled = false;
     document.getElementById('grid-btn').disabled = false;
+    document.getElementById('copy-grid-btn').disabled = false;
+  }
+}
+
+function setControlsBusy(busy) {
+  for (const id of ['fetch-btn', 'zip-btn', 'grid-btn', 'copy-grid-btn']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
   }
 }
 
@@ -301,15 +321,15 @@ async function processWithConcurrency(items, fn, max) {
 }
 
 // ─── Build pipeline: fetch icon → composite with name ────────────────────────
-async function buildLogo(card) {
+async function buildLogo(card, skipIdxs = new Set()) {
   const ctx = {
     ticker: card.ticker,
     domain: card.domain,
     name: card.name,
     slug: card.slug || deriveSlug(card.name || card.ticker),
   };
-  const { result, log } = await fetchIcon(ctx);
-  if (!result) return { blob: null, source: null, log };
+  const { result, log } = await fetchIcon(ctx, skipIdxs);
+  if (!result) return { blob: null, source: null, sourceIdx: -1, log };
   try {
     const iconImg = await blobToImage(result.blob);
     const color = extractDominantColor(iconImg);
@@ -317,33 +337,42 @@ async function buildLogo(card) {
     card.iconImg = iconImg;
     card.color = color;
     const composedBlob = await renderComposite(iconImg, card.name || card.ticker, color);
-    return { blob: composedBlob, source: result.source, log };
+    return { blob: composedBlob, source: result.source, sourceIdx: result.sourceIdx, log };
   } catch (err) {
     log.push({ source: 'composite', status: 'error', detail: err.message || 'compose failed' });
-    return { blob: null, source: null, log };
+    return { blob: null, source: null, sourceIdx: -1, log };
   }
 }
 
-// Re-composite every card that already has a decoded icon, using the current
-// OUTPUT settings. Used by the Settings panel's Save button.
+// Re-composite every card that already has a decoded icon, using current
+// OUTPUT settings. Honors each card's per-card name visibility.
 async function reRenderAll() {
   setStatus('Re-rendering with new settings…');
   await ensureFontLoaded();
+  let n = 0;
   for (const card of cards.values()) {
     if (!card.iconImg) continue;
     try {
-      const blob = await renderComposite(card.iconImg, card.name || card.ticker, card.color || '#1c1f26');
-      applyResult(card, blob, card.source || 'cached');
+      const blob = await renderCardComposite(card);
+      if (blob) {
+        applyResult(card, blob, card.source || 'cached');
+        n++;
+      }
     } catch (err) {
       console.error('re-render', card.ticker, err);
     }
   }
-  setStatus(`Re-rendered ${[...cards.values()].filter((c) => c.iconImg).length} card(s).`);
+  setStatus(`Re-rendered ${n} card(s).`);
 }
 
-async function fetchIcon(ctx) {
+async function fetchIcon(ctx, skipIdxs = new Set()) {
   const log = [];
-  for (const source of SOURCES) {
+  for (let sourceIdx = 0; sourceIdx < SOURCES.length; sourceIdx++) {
+    const source = SOURCES[sourceIdx];
+    if (skipIdxs.has(sourceIdx)) {
+      log.push({ source: source.name, status: 'skipped', detail: 'already tried' });
+      continue;
+    }
     if (!source.enabled()) {
       log.push({ source: source.name, status: 'skipped', detail: 'not configured' });
       continue;
@@ -401,7 +430,7 @@ async function fetchIcon(ctx) {
 
     if (gotBlob) {
       const sourceLabel = gotVia === 'direct' ? source.name : `${source.name} (${gotVia})`;
-      return { result: { blob: gotBlob, source: sourceLabel }, log };
+      return { result: { blob: gotBlob, source: sourceLabel, sourceIdx }, log };
     }
   }
   return { result: null, log };
@@ -454,54 +483,98 @@ function extractDominantColor(img) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-// Render the composite directly onto a destination context. Used both by the
-// per-card export (one card per canvas) and by the grid export (many cards
-// onto a single big canvas).
-function paintComposite(ctx, iconImg, name, color, x, y, cellW, cellH, showName) {
-  const pad = Math.max(8, Math.round(cellH * 0.1));
-  const iconBox = showName
-    ? Math.min(cellH - pad * 2, Math.round(cellW * 0.22))
-    : Math.min(cellH - pad * 2, cellW - pad * 2);
+// Oversampling factor — render the canvas this many times larger than the
+// nominal point size so the PNG stays crisp when scaled in PowerPoint.
+const SCALE = 3;
 
-  // Icon, aspect-preserving, centred either on the left (with name) or in
-  // the whole cell (icon-only).
-  const ratio = Math.min(iconBox / iconImg.width, iconBox / iconImg.height);
+// Compute the canvas geometry for a single composite. When `name` is null,
+// the cell is icon-only. The icon is sized to match the font cap-height so
+// they read at the same visual weight.
+function getMetrics(name) {
+  const fontPx = Math.round(OUTPUT.fontSize * PT_TO_PX * SCALE);
+  const iconSize = fontPx; // 1:1 with font — visually balanced
+  const pad = Math.round(fontPx * 0.5);
+
+  if (!name) {
+    return { fontPx, iconSize, pad, cellW: iconSize + pad * 2, cellH: iconSize + pad * 2 };
+  }
+
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = `700 ${fontPx}px ${fontStack(OUTPUT.font)}`;
+  const textW = measure.measureText(name).width;
+  return {
+    fontPx,
+    iconSize,
+    pad,
+    cellW: Math.round(pad + iconSize + pad + textW + pad),
+    cellH: Math.round(pad + Math.max(iconSize, fontPx) + pad),
+  };
+}
+
+// Like getMetrics but uses the widest text in the array — so all grid cells
+// share a uniform width.
+function getMetricsForGroup(names) {
+  const fontPx = Math.round(OUTPUT.fontSize * PT_TO_PX * SCALE);
+  const iconSize = fontPx;
+  const pad = Math.round(fontPx * 0.5);
+  const hasNames = names && names.some((n) => !!n);
+  if (!hasNames) {
+    return { fontPx, iconSize, pad, cellW: iconSize + pad * 2, cellH: iconSize + pad * 2 };
+  }
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = `700 ${fontPx}px ${fontStack(OUTPUT.font)}`;
+  let maxW = 0;
+  for (const n of names) {
+    if (!n) continue;
+    const w = measure.measureText(n).width;
+    if (w > maxW) maxW = w;
+  }
+  return {
+    fontPx,
+    iconSize,
+    pad,
+    cellW: Math.round(pad + iconSize + pad + maxW + pad),
+    cellH: Math.round(pad + Math.max(iconSize, fontPx) + pad),
+  };
+}
+
+function paintComposite(ctx, iconImg, name, color, x, y, m) {
+  // Icon — aspect-preserving fit into a `iconSize × iconSize` box,
+  // vertically centered in the cell.
+  const ratio = Math.min(m.iconSize / iconImg.width, m.iconSize / iconImg.height);
   const iw = iconImg.width * ratio;
   const ih = iconImg.height * ratio;
-  const ix = showName
-    ? x + pad + (iconBox - iw) / 2
-    : x + (cellW - iw) / 2;
-  const iy = y + (cellH - ih) / 2;
+  const iconBoxX = name ? x + m.pad : x + (m.cellW - m.iconSize) / 2;
+  const iconBoxY = y + (m.cellH - m.iconSize) / 2;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(iconImg, ix, iy, iw, ih);
+  ctx.drawImage(iconImg, iconBoxX + (m.iconSize - iw) / 2, iconBoxY + (m.iconSize - ih) / 2, iw, ih);
 
-  if (!showName) return;
+  if (!name) return;
 
-  // Name beside it: try the user's requested font size first, then shrink to
-  // fit if it would overflow the available width.
-  const textX = x + pad + iconBox + pad;
-  const maxTextWidth = x + cellW - textX - pad;
+  const textX = iconBoxX + m.iconSize + m.pad;
+  const maxTextWidth = x + m.cellW - textX - m.pad;
   ctx.fillStyle = color;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
-  let fontSize = Math.max(12, OUTPUT.fontSize);
-  while (fontSize > 12) {
-    ctx.font = `700 ${fontSize}px ${fontStack(OUTPUT.font)}`;
+  let px = m.fontPx;
+  while (px > 8) {
+    ctx.font = `700 ${px}px ${fontStack(OUTPUT.font)}`;
     if (ctx.measureText(name).width <= maxTextWidth) break;
-    fontSize -= 4;
+    px -= 2;
   }
-  ctx.fillText(name, textX, y + cellH / 2);
+  ctx.fillText(name, textX, y + m.cellH / 2);
 }
 
-async function renderComposite(iconImg, name, color) {
+// Render a single card to a transparent PNG. `nameOverride` lets the per-card
+// name toggle hide the name on just one card; pass null/empty for icon-only.
+async function renderComposite(iconImg, displayName, color) {
   await ensureFontLoaded();
-  const W = OUTPUT.cellW;
-  const H = OUTPUT.cellH;
+  const m = getMetrics(displayName);
   const cvs = document.createElement('canvas');
-  cvs.width = W; cvs.height = H;
+  cvs.width = m.cellW; cvs.height = m.cellH;
   const ctx = cvs.getContext('2d');
-  ctx.clearRect(0, 0, W, H);
-  paintComposite(ctx, iconImg, name, color, 0, 0, W, H, OUTPUT.showName);
+  ctx.clearRect(0, 0, m.cellW, m.cellH);
+  paintComposite(ctx, iconImg, displayName, color, 0, 0, m);
   return new Promise((resolve, reject) =>
     cvs.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png')
   );
@@ -528,7 +601,23 @@ function createCard(ticker, name, domain, slug) {
   node.querySelector('.ticker').textContent = ticker;
   node.querySelector('.name').textContent = name;
   node.querySelector('.source').textContent = domain || 'no domain mapped';
-  return { ticker, name, domain, slug, node, blob: null, source: null, attempts: [] };
+  return {
+    ticker, name, domain, slug, node,
+    blob: null, source: null, sourceIdx: -1,
+    triedSourceIdxs: new Set(),
+    showName: OUTPUT.showName,   // per-card override of global default
+    iconImg: null, color: null,
+    attempts: [],
+  };
+}
+
+// Re-render this card's composite from the cached iconImg/color using its
+// current per-card name visibility. Used after the user toggles "Hide name".
+async function renderCardComposite(card) {
+  if (!card.iconImg) return null;
+  const displayName = card.showName ? (card.name || card.ticker) : null;
+  const blob = await renderComposite(card.iconImg, displayName, card.color || '#1c1f26');
+  return blob;
 }
 
 function applyResult(card, blob, source) {
@@ -537,6 +626,7 @@ function applyResult(card, blob, source) {
   const node = card.node;
   node.dataset.state = 'ok';
 
+  // Swap thumbnail
   const thumb = node.querySelector('.thumb');
   thumb.innerHTML = '';
   const img = document.createElement('img');
@@ -544,13 +634,69 @@ function applyResult(card, blob, source) {
   img.src = URL.createObjectURL(blob);
   thumb.appendChild(img);
 
-  node.querySelector('.source').textContent = `icon via ${source}`;
+  node.querySelector('.source').textContent = `via ${source}`;
 
+  // Copy
+  const copyBtn = node.querySelector('.copy');
+  const freshCopy = copyBtn.cloneNode(true);
+  freshCopy.disabled = false;
+  copyBtn.replaceWith(freshCopy);
+  freshCopy.addEventListener('click', async () => {
+    const ok = await copyBlobToClipboard(card.blob);
+    if (ok) flashButton(freshCopy, 'Copied');
+  });
+
+  // Download
   const dl = node.querySelector('.download');
   const freshDl = dl.cloneNode(true);
   freshDl.disabled = false;
   dl.replaceWith(freshDl);
-  freshDl.addEventListener('click', () => triggerDownload(blob, `${card.ticker}.png`));
+  freshDl.addEventListener('click', () => triggerDownload(card.blob, `${card.ticker}.png`));
+
+  // Per-card name toggle
+  const toggle = node.querySelector('.toggle-name');
+  const freshToggle = toggle.cloneNode(true);
+  freshToggle.disabled = false;
+  freshToggle.textContent = card.showName ? 'Hide name' : 'Show name';
+  toggle.replaceWith(freshToggle);
+  freshToggle.addEventListener('click', async () => {
+    card.showName = !card.showName;
+    freshToggle.textContent = card.showName ? 'Hide name' : 'Show name';
+    freshToggle.disabled = true;
+    const newBlob = await renderCardComposite(card);
+    if (newBlob) {
+      card.blob = newBlob;
+      img.src = URL.createObjectURL(newBlob);
+    }
+    freshToggle.disabled = false;
+  });
+
+  // Try next source
+  const next = node.querySelector('.next-source');
+  const freshNext = next.cloneNode(true);
+  freshNext.disabled = false;
+  next.replaceWith(freshNext);
+  freshNext.addEventListener('click', async () => {
+    freshNext.disabled = true;
+    node.dataset.state = 'loading';
+    thumb.innerHTML = '<div class="spinner"></div>';
+    const out = await buildLogo(card, card.triedSourceIdxs);
+    if (out.blob) {
+      card.triedSourceIdxs.add(out.sourceIdx);
+      card.sourceIdx = out.sourceIdx;
+      applyResult(card, out.blob, out.source);
+    } else {
+      // No more sources — restore the current good logo and let the user know.
+      node.dataset.state = 'ok';
+      thumb.innerHTML = '';
+      const restoreImg = document.createElement('img');
+      restoreImg.alt = `${card.ticker} logo`;
+      restoreImg.src = URL.createObjectURL(card.blob);
+      thumb.appendChild(restoreImg);
+      flashButton(freshNext, 'No more sources');
+    }
+    freshNext.disabled = false;
+  });
 }
 
 function applyError(card) {
@@ -573,13 +719,18 @@ function applyError(card) {
     const domain = input.value.trim().toLowerCase();
     if (!domain) return;
     card.domain = domain;
+    card.triedSourceIdxs = new Set();
     node.dataset.state = 'loading';
     thumb.innerHTML = '<div class="spinner"></div>';
     const out = await buildLogo(card);
     card.attempts = out.log;
     if (out.blob) {
+      card.triedSourceIdxs.add(out.sourceIdx);
+      card.sourceIdx = out.sourceIdx;
       applyResult(card, out.blob, out.source);
       document.getElementById('zip-btn').disabled = false;
+      document.getElementById('grid-btn').disabled = false;
+      document.getElementById('copy-grid-btn').disabled = false;
     } else {
       applyError(card);
     }
@@ -594,7 +745,28 @@ function applyError(card) {
     list.appendChild(li);
   }
   details.hidden = card.attempts.length === 0;
-  details.open = card.attempts.length > 0; // expand by default on failure
+  details.open = false; // expanded only when the user clicks the summary
+}
+
+// Briefly swap a button's label to give feedback, then restore.
+function flashButton(btn, msg, ms = 1400) {
+  const orig = btn.textContent;
+  btn.textContent = msg;
+  setTimeout(() => { btn.textContent = orig; }, ms);
+}
+
+// Copy a Blob (PNG) to the system clipboard via the async Clipboard API.
+async function copyBlobToClipboard(blob) {
+  try {
+    if (!navigator.clipboard || typeof ClipboardItem === 'undefined') {
+      throw new Error('Clipboard API unavailable in this browser');
+    }
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
+    return true;
+  } catch (err) {
+    setStatus(`Copy failed: ${err.message}`);
+    return false;
+  }
 }
 
 function escapeHtml(s) {
@@ -603,33 +775,57 @@ function escapeHtml(s) {
   })[c]);
 }
 
-// ─── ZIP export ──────────────────────────────────────────────────────────────
-async function onGridClicked() {
+// Build a single PNG that tiles every successful logo in a grid. Uses a
+// uniform cell size based on the widest name so columns align cleanly.
+// Each cell still respects its card's per-card `showName` toggle.
+async function buildGridBlob() {
   const ready = [...cards.values()].filter((c) => c.iconImg);
-  if (!ready.length) { setStatus('Nothing to grid — no logos succeeded.'); return; }
-  setStatus(`Building grid PNG (${ready.length} logos)…`);
+  if (!ready.length) return null;
   await ensureFontLoaded();
-  const { cellW, cellH, gridCols, gridPad, showName } = OUTPUT;
-  const cols = Math.min(gridCols, ready.length);
+
+  // Cell size — derive uniform cellW from the widest visible name. Cards
+  // hiding their name still slot into the same cell width for alignment.
+  const visibleNames = ready.map((c) => (c.showName ? (c.name || c.ticker) : ''));
+  const m = getMetricsForGroup(visibleNames);
+
+  const cols = Math.min(OUTPUT.gridCols, ready.length);
   const rows = Math.ceil(ready.length / cols);
-  const W = cols * cellW + (cols + 1) * gridPad;
-  const H = rows * cellH + (rows + 1) * gridPad;
+  const pad = OUTPUT.gridPad * SCALE;
+  const W = cols * m.cellW + (cols + 1) * pad;
+  const H = rows * m.cellH + (rows + 1) * pad;
   const cvs = document.createElement('canvas');
   cvs.width = W; cvs.height = H;
   const ctx = cvs.getContext('2d');
-  ctx.clearRect(0, 0, W, H); // transparent background
+  ctx.clearRect(0, 0, W, H);
+
   ready.forEach((card, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
-    const x = gridPad + col * (cellW + gridPad);
-    const y = gridPad + row * (cellH + gridPad);
-    paintComposite(ctx, card.iconImg, card.name || card.ticker, card.color || '#1c1f26', x, y, cellW, cellH, showName);
+    const x = pad + col * (m.cellW + pad);
+    const y = pad + row * (m.cellH + pad);
+    const displayName = card.showName ? (card.name || card.ticker) : null;
+    paintComposite(ctx, card.iconImg, displayName, card.color || '#1c1f26', x, y, m);
   });
-  const blob = await new Promise((resolve, reject) =>
+
+  return new Promise((resolve, reject) =>
     cvs.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png')
   );
+}
+
+async function onGridClicked() {
+  setStatus('Building grid PNG…');
+  const blob = await buildGridBlob();
+  if (!blob) { setStatus('Nothing to grid — no logos succeeded.'); return; }
   triggerDownload(blob, `logo-grid-${timestamp()}.png`);
-  setStatus(`Downloaded grid (${cols}×${rows}, ${W}×${H}px).`);
+  setStatus(`Downloaded grid PNG (${blob.size.toLocaleString()} bytes).`);
+}
+
+async function onCopyGridClicked() {
+  setStatus('Building grid PNG…');
+  const blob = await buildGridBlob();
+  if (!blob) { setStatus('Nothing to grid — no logos succeeded.'); return; }
+  const ok = await copyBlobToClipboard(blob);
+  if (ok) setStatus('Grid PNG copied to clipboard.');
 }
 
 async function onZipClicked() {
